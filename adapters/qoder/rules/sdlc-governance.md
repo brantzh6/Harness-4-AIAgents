@@ -48,9 +48,13 @@ Qoder 作为单 agent，通过以下方式实现 role-switching：
 ├── rules/
 │   ├── sdlc-governance.md        ← 本文件
 │   ├── model-routing-policy.md   ← 模型路由策略
+│   ├── model-registry.md         ← 模型注册表
+│   ├── monitoring-feedback-loop.md ← 监控反馈闭环
+│   ├── testing-standards.md      ← 测试规约
 │   └── project-profile.md        ← 项目 Profile
 ├── agents/
 │   └── claude-worker.md          ← Claude Worker Agent
-└── claude-worker/
-    └── worker.py                 ← Claude Worker 代码
+├── claude-worker/
+│   └── worker.py                 ← Claude Worker 代码
+└── logs/sdlc/                    ← SDLC 日志目录
 ```

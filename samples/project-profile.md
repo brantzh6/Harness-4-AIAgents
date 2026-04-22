@@ -23,6 +23,7 @@
 | Default Class | B | 运行时行为变更 |
 | Default Template | T2 | 标准治理 |
 | Default Gate Profile | G-Std | 标准 Gate |
+| Project Phase | P2 | 成长阶段（P1 新建 / P2 成长 / P3 成熟迭代 / P4 遗留接管） |
 
 ---
 
@@ -94,3 +95,21 @@ max_concurrent_workers: 1
 - **提交规范**: Conventional Commits
 - **PR 策略**: 所有变更通过 PR 合入
 - **Review 要求**: T2+ 任务必须有 review 记录
+
+---
+
+## 9. 测试配置
+
+```yaml
+# 项目阶段（影响测试策略选择，详见 testing-standards.md）
+project_phase: P2           # P1(新建) / P2(成长) / P3(成熟迭代) / P4(遗留接管)
+
+# 覆盖率目标
+coverage_target_new_code: 80%    # 新增代码覆盖率
+coverage_target_overall: TBD     # 总体覆盖率（P3 项目建议设置）
+
+# 测试基础设施
+test_framework: TBD              # 如 pytest, jest, vitest 等
+test_dir: TBD                    # 如 tests/, __tests__/
+ci_pipeline: TBD                 # 如 GitHub Actions, GitLab CI
+```

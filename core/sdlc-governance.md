@@ -74,7 +74,21 @@
 
 不确定时默认：**Class B**
 
-### 2.5 治理模板与 Gate Profile
+### 2.5 项目阶段 (Phase)
+
+| Phase | 名称 | 判定标准 |
+|-------|------|----------|
+| P1 | 新建 (Bootstrap) | 从零开始，无历史代码，无已有测试 |
+| P2 | 成长 (Growth) | 已有基础代码，功能快速新增中 |
+| P3 | 成熟迭代 (Stable) | 功能基本稳定，以迭代优化和维护为主 |
+| P4 | 遗留/接管 (Legacy) | 接手他人代码，或系统老化缺少测试 |
+
+Phase 在 Project Profile 中声明，影响测试策略选择（详见 `testing-standards.md`）。
+Phase 不影响 Level/Type/Risk/Class 的分类流程。
+
+不确定时默认：**P2**
+
+### 2.6 治理模板与 Gate Profile
 
 | Template | 名称 | 适用 | Gate Profile |
 |----------|------|------|-------------|
@@ -84,13 +98,14 @@
 
 **所有 7 个 Gate（G1-G7）始终存在。** Gate Profile 决定每个 Gate 的严格程度，而非是否存在。
 
-### 2.6 分类输出格式
+### 2.7 分类输出格式
 
 ```
 ## Task Classification
 - Task ID:
 - Project Level: L1 / L2 / L3
 - Project Type: A / B / C / D
+- Project Phase: P1 / P2 / P3 / P4
 - Change Risk: R1 / R2 / R3
 - Change Class: A / B / C / D
 - Governance Template: T1 / T2 / T3
@@ -226,12 +241,16 @@ T2 全部加上：独立 review（调用 Claude Worker 或等效外部审查）
 ### 每层级最低要求
 
 | Tier | 必需层级 | Gate 规则 |
-|------|----------|-----------|
+|------|----------|----------|
 | T1/G-Lite | L1 | 函数级检查即可 |
 | T2/G-Std | L1 + L2 + 至少 1 条 L3 路径 | 仅 L1 明确不够 |
 | T3/G-Full | L1 + L2 + 完整 L3 + L4 | 包括 E2E 和验收 |
 
 **硬规则**：T2+ 任务中如果 delegate 只提供 L1 证据，controller 必须拒绝或要求补充测试。
+
+### 按项目阶段差异化
+
+以上为分级门槛。按项目阶段（P1-P4）差异化的测试策略、覆盖率目标、G5 检查清单和项目类型特殊要求，详见 `testing-standards.md`。
 
 ---
 

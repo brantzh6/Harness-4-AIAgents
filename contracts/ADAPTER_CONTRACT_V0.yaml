@@ -1077,7 +1077,7 @@ x-ief-examples:
 
   # Example 1: GitHub comment input mapping
   github_comment_mapping:
-    description: Mapping a GitHub issue comment with 'Label: ACTION REQUIRED' to a HostEvent
+    description: "Mapping a GitHub issue comment with 'Label: ACTION REQUIRED' to a HostEvent"
     raw_input:
       raw_payload:
         action: created
@@ -1129,7 +1129,7 @@ x-ief-examples:
 
   # Example 2: CLI result input mapping
   cli_result_mapping:
-    description: Mapping a CLI tool execution result to a HostEvent
+    description: "Mapping a CLI tool execution result to a HostEvent"
     raw_input:
       raw_payload:
         command: "pytest tests/ -v"
@@ -1175,7 +1175,7 @@ x-ief-examples:
 
   # Example 3: Ambiguous input rejection
   ambiguous_input_rejection:
-    description: Rejecting an ambiguous input that cannot be reliably normalized
+    description: "Rejecting an ambiguous input that cannot be reliably normalized"
     raw_input:
       raw_payload:
         message: "do something"

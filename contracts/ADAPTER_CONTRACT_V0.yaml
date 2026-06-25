@@ -1,0 +1,1212 @@
+openapi: 3.1.0
+info:
+  title: IEF Adapter Contract
+  version: 0.1.0
+  description: |
+    Declarative contract for IEF adapter behavior. Adapters translate external host events
+    into normalized HostEvent/TaskEnvelope objects for the IEF control plane. They do not
+    execute tasks, approve work, or claim completion.
+
+    This contract defines:
+    - Adapter identity and metadata
+    - Host surface declarations
+    - Input event envelope schema
+    - Output mapping to IEF objects
+    - Error handling
+    - Idempotency and deduplication
+    - Version binding rules
+    - Unsupported input behavior
+    - No-fake-completion rules
+
+    **Adapters translate and report only. They do not approve, execute, or claim completion.**
+
+  contact:
+    name: IEF Program Controller
+  license:
+    name: Proprietary
+    identifier: LicenseRef-IEF
+
+  x-ief-metadata:
+    status: FROZEN_CONTRACT_V0
+    created: "2026-06-25T18:00:00+08:00"
+    authority: Program Controller EXECUTION_AUTHORIZATION (P1)
+    baseline: IEF-Adapters main
+    companion_specs:
+      - core/adapter-event-envelope.md
+      - core/adapter-boundary-rules.md
+      - core/integration-interfaces.md
+
+# ============================================================================
+# Section 1: Adapter Identity and Metadata Schema
+# ============================================================================
+
+components:
+  schemas:
+
+    AdapterIdentity:
+      type: object
+      required:
+        - adapter_id
+        - adapter_version
+        - host_system
+        - registered_at
+        - contract_version
+      properties:
+        adapter_id:
+          type: string
+          pattern: "^[a-z][a-z0-9-]{2,63}$"
+          description: |
+            Unique adapter identifier. Lowercase alphanumeric with hyphens.
+            Examples: 'github-adapter', 'openclaw-adapter', 'cli-adapter'.
+        adapter_version:
+          type: string
+          pattern: "^\\d+\\.\\d+\\.\\d+(-[a-zA-Z0-9.]+)?$"
+          description: Semantic version of this adapter implementation.
+        host_system:
+          type: string
+          enum:
+            - github
+            - hermes
+            - openclaw
+            - qoder
+            - cli
+            - ide
+            - chat_platform
+            - automation_gateway
+          description: The host system this adapter interfaces with.
+        registered_at:
+          type: string
+          format: date-time
+          description: ISO-8601 timestamp when this adapter was registered with the control plane.
+        contract_version:
+          type: string
+          const: "0.1.0"
+          description: Version of this contract the adapter conforms to.
+        capabilities:
+          type: array
+          items:
+            type: string
+            enum:
+              - read
+              - normalize
+              - envelope
+              - forward
+              - dedup
+              - log
+              - reject
+              - report
+          description: |
+            Declared capabilities from the MAY table (core/adapter-boundary-rules.md §1).
+            Adapters must declare which capabilities they implement.
+        prohibited_actions:
+          type: array
+          items:
+            type: string
+            enum:
+              - mutate_stage_state
+              - decide_stage_transitions
+              - store_durable_state_outside_github
+              - auto_dispatch
+              - modify_protocol_schemas
+              - expand_scope
+              - close_issues_or_prs
+              - rewrite_raw_events
+              - approve_work
+              - execute_tasks
+              - claim_completion
+          description: |
+            Acknowledged prohibitions from the MUST NOT table (core/adapter-boundary-rules.md §2).
+            Adapters must declare awareness of all prohibitions.
+
+    AdapterMetadata:
+      type: object
+      required:
+        - identity
+        - host_surface
+        - input_channels
+        - output_targets
+      properties:
+        identity:
+          $ref: "#/components/schemas/AdapterIdentity"
+        host_surface:
+          $ref: "#/components/schemas/HostSurface"
+        input_channels:
+          type: array
+          items:
+            $ref: "#/components/schemas/InputChannel"
+          minItems: 1
+          description: Registered input channels this adapter listens to.
+        output_targets:
+          type: array
+          items:
+            $ref: "#/components/schemas/OutputTarget"
+          minItems: 1
+          description: Registered output targets for normalized events.
+
+# ============================================================================
+# Section 2: Host Surface Declaration
+# ============================================================================
+
+    HostSurface:
+      type: object
+      required:
+        - surface_type
+        - surface_version
+        - supported_event_types
+      properties:
+        surface_type:
+          type: string
+          enum:
+            - github_webhook
+            - github_api
+            - hermes_skill_api
+            - openclaw_cron
+            - openclaw_session
+            - qoder_agent_api
+            - cli_stdin
+            - cli_file
+            - ide_extension_api
+            - chat_platform_webhook
+            - automation_gateway_api
+          description: The type of host surface this adapter interfaces with.
+        surface_version:
+          type: string
+          description: Version of the host surface API (e.g., GitHub API v3, OpenClaw v1).
+        supported_event_types:
+          type: array
+          items:
+            type: string
+            enum:
+              - issue_comment
+              - pr_review
+              - pr_merge
+              - push
+              - cron_trigger
+              - skill_invocation
+              - agent_turn
+              - cli_result
+              - ide_action
+              - chat_message
+              - webhook_generic
+              - normalization_failure
+          minItems: 1
+          description: Event types this adapter can normalize from this surface.
+        authentication:
+          type: object
+          properties:
+            method:
+              type: string
+              enum:
+                - webhook_secret
+                - oauth2
+                - api_key
+                - mTLS
+                - none
+              description: Authentication method for this surface.
+            scope:
+              type: string
+              description: Required permissions or scopes for this surface.
+        rate_limits:
+          type: object
+          properties:
+            requests_per_minute:
+              type: integer
+              minimum: 0
+            burst_limit:
+              type: integer
+              minimum: 0
+          description: Rate limits imposed by the host surface.
+
+    InputChannel:
+      type: object
+      required:
+        - channel_id
+        - channel_type
+        - endpoint
+      properties:
+        channel_id:
+          type: string
+          format: uuid
+          description: Unique identifier for this input channel registration.
+        channel_type:
+          type: string
+          enum:
+            - webhook
+            - polling
+            - event_stream
+            - stdin
+            - file_watch
+          description: How this channel receives events.
+        endpoint:
+          type: string
+          description: |
+            Endpoint URI or path. For webhooks: the URL. For polling: the API endpoint.
+            For stdin: 'stdin://'. For file watch: the directory path.
+        filters:
+          type: object
+          properties:
+            repos:
+              type: array
+              items:
+                type: string
+                pattern: "^[^/]+/[^/]+$"
+              description: Restrict to these owner/repo patterns.
+            event_types:
+              type: array
+              items:
+                type: string
+              description: Restrict to these event types.
+            actors:
+              type: array
+              items:
+                type: string
+              description: Restrict to these actor identities.
+
+    OutputTarget:
+      type: object
+      required:
+        - target_id
+        - target_type
+        - endpoint
+      properties:
+        target_id:
+          type: string
+          format: uuid
+          description: Unique identifier for this output target registration.
+        target_type:
+          type: string
+          enum:
+            - control_plane_api
+            - message_queue
+            - file_sink
+            - stdout
+          description: How normalized events are delivered.
+        endpoint:
+          type: string
+          description: Target endpoint URI.
+        retry_policy:
+          type: object
+          properties:
+            max_retries:
+              type: integer
+              minimum: 0
+              default: 3
+            backoff_ms:
+              type: integer
+              minimum: 0
+              default: 1000
+            backoff_multiplier:
+              type: number
+              minimum: 1.0
+              default: 2.0
+          description: Retry policy for failed deliveries.
+
+# ============================================================================
+# Section 3: Input Event Envelope Schema
+# ============================================================================
+
+    RawInputEvent:
+      type: object
+      required:
+        - raw_payload
+        - captured_at
+        - source_system
+      properties:
+        raw_payload:
+          type: object
+          description: |
+            The verbatim external payload as received from the host surface.
+            Adapters must not modify, filter, or transform this payload before hashing.
+          additionalProperties: true
+        raw_payload_hash:
+          type: string
+          pattern: "^[a-fA-F0-9]{64}$"
+          description: SHA-256 hex digest of raw_payload. Computed by adapter at capture time.
+        captured_at:
+          type: string
+          format: date-time
+          description: ISO-8601 timestamp when the adapter captured this raw event.
+        source_system:
+          type: string
+          description: The host system that produced this event.
+        staging_ref:
+          type: string
+          description: |
+            Local staging path or external reference to the persisted raw payload.
+            Enables traceability, replay, and audit. Must be immutable after capture.
+        transport_metadata:
+          type: object
+          description: |
+            Transport-layer metadata (HTTP headers, webhook signatures, etc.).
+            Not part of the normalized event but preserved for audit.
+          additionalProperties: true
+
+# ============================================================================
+# Section 4: Output Mapping to IEF Objects
+# ============================================================================
+
+    HostEvent:
+      type: object
+      required:
+        - host_event_id
+        - source
+        - ingested_at
+        - event_type
+        - entity
+        - actor
+      properties:
+        host_event_id:
+          type: string
+          format: uuid
+          description: UUID v4 unique identifier for this normalized event.
+        source:
+          type: object
+          required:
+            - system
+            - adapter
+            - raw_payload_hash
+          properties:
+            system:
+              type: string
+              enum:
+                - github
+                - hermes
+                - openclaw
+                - qoder
+                - cli
+                - ide
+                - chat_platform
+                - automation_gateway
+              description: Originating host system.
+            adapter:
+              type: string
+              description: Adapter name that performed normalization.
+            raw_payload_hash:
+              type: string
+              pattern: "^[a-fA-F0-9]{64}$"
+              description: SHA-256 hex digest of raw payload, captured verbatim.
+            raw_event_ref:
+              type: string
+              description: Reference to raw payload for replay/audit.
+        ingested_at:
+          type: string
+          format: date-time
+          description: ISO-8601 timestamp when the adapter captured this event.
+        event_type:
+          type: string
+          enum:
+            - issue_comment
+            - pr_review
+            - pr_merge
+            - push
+            - cron_trigger
+            - skill_invocation
+            - agent_turn
+            - cli_result
+            - ide_action
+            - chat_message
+            - webhook_generic
+            - normalization_failure
+          description: Normalized event type.
+        entity:
+          type: object
+          required:
+            - repo
+          properties:
+            repo:
+              type: string
+              pattern: "^[^/]+/[^/]+$"
+              description: Owner/repo identifier.
+            issue_number:
+              type:
+                - integer
+                - "null"
+              description: GitHub issue number, or null.
+            pr_number:
+              type:
+                - integer
+                - "null"
+              description: GitHub PR number, or null.
+            comment_id:
+              type:
+                - string
+                - integer
+                - "null"
+              description: Comment identifier, or null.
+            branch:
+              type:
+                - string
+                - "null"
+              description: Branch name, or null.
+            commit_sha:
+              type:
+                - string
+                - "null"
+              description: Commit SHA, or null.
+        actor:
+          type: string
+          description: Identity of the entity that triggered the event.
+        directive_text:
+          type:
+            - string
+            - "null"
+          description: Extracted instruction or directive, or null.
+        labels:
+          type: array
+          items:
+            type: string
+          description: Labels associated with the entity.
+        classification_hint:
+          type:
+            - string
+            - "null"
+          description: Optional PM classification hint. PM owns final classification.
+
+    TaskEnvelope:
+      type: object
+      required:
+        - schema_version
+        - envelope_id
+        - host_event
+        - control_plane_action
+        - priority
+        - created_at
+      properties:
+        schema_version:
+          type: string
+          const: v1
+          description: Envelope schema version.
+        envelope_id:
+          type: string
+          format: uuid
+          description: UUID v4 unique identifier for this envelope.
+        host_event:
+          $ref: "#/components/schemas/HostEvent"
+        control_plane_action:
+          type: string
+          enum:
+            - dispatch
+            - ack
+            - escalate
+            - dedup_consume
+          description: Action the control plane should take.
+        priority:
+          type: string
+          enum:
+            - normal
+            - urgent
+            - blocker
+          description: Priority level for routing.
+        routing_hint:
+          type: object
+          required:
+            - target_repo
+          properties:
+            target_repo:
+              type: string
+              pattern: "^[^/]+/[^/]+$"
+              description: Target repository.
+            target_issue_or_pr:
+              type:
+                - integer
+                - "null"
+              description: Target issue or PR number.
+            task_type:
+              type:
+                - string
+                - "null"
+              description: Optional task type hint.
+        created_at:
+          type: string
+          format: date-time
+          description: ISO-8601 envelope creation timestamp.
+
+    ArtifactRef:
+      type: object
+      required:
+        - artifact_id
+        - artifact_type
+        - uri
+        - hash
+      properties:
+        artifact_id:
+          type: string
+          format: uuid
+          description: Unique artifact identifier.
+        artifact_type:
+          type: string
+          enum:
+            - raw_payload
+            - normalized_event
+            - task_envelope
+            - delivery_report
+            - ledger_entry
+            - verification_result
+          description: Type of artifact.
+        uri:
+          type: string
+          description: Resolvable URI to the artifact content.
+        hash:
+          type: string
+          pattern: "^[a-fA-F0-9]{64}$"
+          description: SHA-256 hash of artifact content.
+        size_bytes:
+          type: integer
+          minimum: 0
+          description: Size in bytes.
+        created_at:
+          type: string
+          format: date-time
+          description: When the artifact was created.
+
+    RunEvent:
+      type: object
+      required:
+        - run_event_id
+        - run_id
+        - event_type
+        - timestamp
+      properties:
+        run_event_id:
+          type: string
+          format: uuid
+          description: Unique run event identifier.
+        run_id:
+          type: string
+          format: uuid
+          description: Parent run identifier.
+        event_type:
+          type: string
+          enum:
+            - run_started
+            - run_completed
+            - run_failed
+            - worker_dispatched
+            - worker_completed
+            - verification_started
+            - verification_completed
+            - review_requested
+            - review_completed
+          description: Run lifecycle event type.
+        timestamp:
+          type: string
+          format: date-time
+          description: When the event occurred.
+        actor:
+          type: string
+          description: Agent or system that produced this event.
+        details:
+          type: object
+          description: Event-specific details.
+          additionalProperties: true
+
+# ============================================================================
+# Section 5: Error Handling Schema
+# ============================================================================
+
+    AdapterError:
+      type: object
+      required:
+        - error_code
+        - error_message
+        - timestamp
+        - adapter_id
+      properties:
+        error_code:
+          type: string
+          enum:
+            - NORMALIZATION_FAILURE
+            - SCHEMA_VALIDATION_FAILED
+            - DEDUP_CONFLICT
+            - RATE_LIMIT_EXCEEDED
+            - AUTH_FAILURE
+            - TRANSPORT_FAILURE
+            - UNSUPPORTED_INPUT
+            - BOUNDARY_VIOLATION
+            - CONTRACT_VERSION_MISMATCH
+            - RAW_PAYLOAD_CORRUPT
+            - STAGING_WRITE_FAILED
+            - FORWARD_FAILED
+          description: Machine-readable error code.
+        error_message:
+          type: string
+          description: Human-readable error description.
+        timestamp:
+          type: string
+          format: date-time
+          description: When the error occurred.
+        adapter_id:
+          type: string
+          description: Adapter that encountered the error.
+        raw_payload_hash:
+          type: string
+          pattern: "^[a-fA-F0-9]{64}$"
+          description: Hash of the raw payload that caused the error, if applicable.
+        retry_eligible:
+          type: boolean
+          description: Whether this error is transient and eligible for retry.
+        severity:
+          type: string
+          enum:
+            - warning
+            - error
+            - critical
+          description: Error severity level.
+        context:
+          type: object
+          description: Additional error context.
+          additionalProperties: true
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - host_event
+      properties:
+        error:
+          $ref: "#/components/schemas/AdapterError"
+        host_event:
+          $ref: "#/components/schemas/HostEvent"
+          description: |
+            A HostEvent with event_type='normalization_failure' wrapping the error.
+            This allows error events to flow through the same TaskEnvelope pipeline.
+
+# ============================================================================
+# Section 6: Idempotency and Dedupe Metadata
+# ============================================================================
+
+    DedupeKey:
+      type: object
+      required:
+        - dedupe_key
+        - computed_from
+        - first_seen_at
+      properties:
+        dedupe_key:
+          type: string
+          pattern: "^[a-fA-F0-9]{64}$"
+          description: |
+            Deterministic dedup key: sha256(raw_payload + source.system + event_type).
+            See core/adapter-event-envelope.md §3.
+        computed_from:
+          type: object
+          required:
+            - raw_payload_hash
+            - source_system
+            - event_type
+          properties:
+            raw_payload_hash:
+              type: string
+              pattern: "^[a-fA-F0-9]{64}$"
+            source_system:
+              type: string
+            event_type:
+              type: string
+        first_seen_at:
+          type: string
+          format: date-time
+          description: When this dedupe key was first encountered.
+        last_seen_at:
+          type: string
+          format: date-time
+          description: Most recent occurrence of this dedupe key.
+        occurrence_count:
+          type: integer
+          minimum: 1
+          default: 1
+          description: Number of times this dedupe key has been seen.
+
+    IdempotencyMetadata:
+      type: object
+      required:
+        - dedupe_key
+        - idempotency_status
+      properties:
+        dedupe_key:
+          $ref: "#/components/schemas/DedupeKey"
+        idempotency_status:
+          type: string
+          enum:
+            - new
+            - duplicate
+            - replay
+          description: |
+            - new: first occurrence, proceed with normalization
+            - duplicate: already processed, skip and log
+            - replay: explicit replay request, re-normalize but flag
+        previous_envelope_id:
+          type: string
+          format: uuid
+          description: If duplicate, the envelope_id of the first occurrence.
+        replay_reason:
+          type: string
+          description: If replay, why this event is being reprocessed.
+
+# ============================================================================
+# Section 7: Version Binding Rules
+# ============================================================================
+
+    VersionBinding:
+      type: object
+      required:
+        - contract_version
+        - adapter_version
+        - host_surface_version
+        - schema_version
+      properties:
+        contract_version:
+          type: string
+          const: "0.1.0"
+          description: Version of this contract.
+        adapter_version:
+          type: string
+          description: Semantic version of the adapter implementation.
+        host_surface_version:
+          type: string
+          description: Version of the host surface API.
+        schema_version:
+          type: string
+          const: v1
+          description: TaskEnvelope schema version.
+        compatibility:
+          type: object
+          properties:
+            backward_compatible:
+              type: boolean
+              default: true
+              description: Whether this binding is backward-compatible with prior versions.
+            breaking_changes:
+              type: array
+              items:
+                type: string
+              description: List of breaking changes, if any.
+            migration_notes:
+              type: string
+              description: Notes for migrating from prior versions.
+
+    VersionNegotiation:
+      type: object
+      required:
+        - requested_version
+        - supported_versions
+        - negotiated_version
+      properties:
+        requested_version:
+          type: string
+          description: Version requested by the client or host.
+        supported_versions:
+          type: array
+          items:
+            type: string
+          description: Versions this adapter supports.
+        negotiated_version:
+          type: string
+          description: The version that will be used for this interaction.
+        status:
+          type: string
+          enum:
+            - accepted
+            - rejected
+            - fallback
+          description: |
+            - accepted: requested version is supported
+            - rejected: no compatible version found
+            - fallback: requested version not supported, using closest compatible
+
+# ============================================================================
+# Section 8: Unsupported Input Behavior
+# ============================================================================
+
+    UnsupportedInputResponse:
+      type: object
+      required:
+        - status
+        - rejection_reason
+        - raw_payload_hash
+        - timestamp
+      properties:
+        status:
+          type: string
+          const: rejected
+          description: The input was rejected without normalization.
+        rejection_reason:
+          type: string
+          enum:
+            - unknown_event_type
+            - malformed_payload
+            - missing_required_fields
+            - unsupported_host_system
+            - authentication_failure
+            - rate_limit_exceeded
+            - payload_too_large
+            - schema_validation_failed
+          description: Why the input was rejected.
+        raw_payload_hash:
+          type: string
+          pattern: "^[a-fA-F0-9]{64}$"
+          description: Hash of the rejected payload for audit.
+        timestamp:
+          type: string
+          format: date-time
+          description: When the rejection occurred.
+        adapter_id:
+          type: string
+          description: Adapter that rejected the input.
+        error_detail:
+          type: string
+          description: Human-readable detail about the rejection.
+        logged:
+          type: boolean
+          const: true
+          description: Confirmation that the rejection was logged for audit.
+        forwarded:
+          type: boolean
+          default: false
+          description: |
+            Whether a normalization_failure HostEvent was forwarded to the control plane.
+            Adapters may forward rejection events for visibility but must not fake completion.
+
+# ============================================================================
+# Section 9: No-Fake-Completion Rules
+# ============================================================================
+
+    NoFakeCompletionRules:
+      type: object
+      description: |
+        Adapters translate and report only. They do not approve, execute, or claim completion.
+        These rules are enforced at the contract level and verified by the boundary dimension
+        of the Verification Module.
+      required:
+        - rules
+        - violation_consequences
+      properties:
+        rules:
+          type: array
+          items:
+            type: object
+            required:
+              - rule_id
+              - rule_text
+              - rationale
+            properties:
+              rule_id:
+                type: string
+                enum:
+                  - NFC-1
+                  - NFC-2
+                  - NFC-3
+                  - NFC-4
+                  - NFC-5
+                  - NFC-6
+              rule_text:
+                type: string
+              rationale:
+                type: string
+          description: |
+            NFC-1: Adapters must not mark tasks as completed, approved, or resolved.
+            NFC-2: Adapters must not generate synthetic RunEvent types (run_completed, review_completed).
+            NFC-3: Adapters must not modify authoritative stage state in GitHub.
+            NFC-4: Adapters must not auto-dispatch or auto-forward without explicit control plane action.
+            NFC-5: Adapters must not close issues or merge PRs.
+            NFC-6: Adapters must report failures honestly, including normalization_failure events.
+        violation_consequences:
+          type: object
+          properties:
+            detection:
+              type: string
+              description: How violations are detected (boundary dimension verification).
+            response:
+              type: string
+              description: What happens when a violation is detected (rollback, lockdown).
+            authority:
+              type: string
+              description: Who handles violations (Controller, L3).
+
+# ============================================================================
+# Paths: Adapter Operations
+# ============================================================================
+
+paths:
+  /adapter/register:
+    post:
+      operationId: registerAdapter
+      summary: Register an adapter with the control plane
+      description: |
+        Registers a new adapter instance. The adapter declares its identity, capabilities,
+        host surface, input channels, and output targets. The control plane validates the
+        declaration against this contract and returns a registration confirmation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdapterMetadata"
+      responses:
+        "201":
+          description: Adapter registered successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    const: registered
+                  adapter_id:
+                    type: string
+                  registered_at:
+                    type: string
+                    format: date-time
+        "400":
+          description: Invalid adapter metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdapterError"
+        "409":
+          description: Adapter already registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdapterError"
+
+  /adapter/ingest:
+    post:
+      operationId: ingestRawEvent
+      summary: Ingest a raw external event
+      description: |
+        Accepts a raw external event from the host surface. The adapter must:
+        1. Capture the raw payload verbatim
+        2. Compute SHA-256 hash
+        3. Persist to staging
+        4. Check dedupe key
+        5. Normalize to HostEvent
+        6. Wrap in TaskEnvelope
+        7. Forward to output target
+
+        If normalization fails, the adapter must produce a normalization_failure HostEvent
+        and may forward it for visibility. The adapter must not fake completion.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RawInputEvent"
+      responses:
+        "202":
+          description: Event accepted and normalized
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - normalized
+                      - duplicate
+                      - rejected
+                  envelope_id:
+                    type: string
+                    format: uuid
+                  dedupe_key:
+                    type: string
+                  idempotency_status:
+                    type: string
+                    enum:
+                      - new
+                      - duplicate
+                      - replay
+        "400":
+          description: Malformed or unsupported input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnsupportedInputResponse"
+        "409":
+          description: Dedupe conflict (duplicate event)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    const: duplicate
+                  dedupe_key:
+                    type: string
+                  previous_envelope_id:
+                    type: string
+                    format: uuid
+
+  /adapter/health:
+    get:
+      operationId: adapterHealth
+      summary: Get adapter health status
+      responses:
+        "200":
+          description: Adapter is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - healthy
+                      - degraded
+                      - unhealthy
+                  adapter_id:
+                    type: string
+                  uptime_seconds:
+                    type: integer
+                  events_processed:
+                    type: integer
+                  errors_total:
+                    type: integer
+                  last_event_at:
+                    type: string
+                    format: date-time
+
+# ============================================================================
+# Examples
+# ============================================================================
+
+x-ief-examples:
+
+  # Example 1: GitHub comment input mapping
+  github_comment_mapping:
+    description: "Mapping a GitHub issue comment with 'Label: ACTION REQUIRED' to a HostEvent"
+    raw_input:
+      raw_payload:
+        action: created
+        issue:
+          number: 2
+          title: "Adapter Contract v0"
+        comment:
+          id: 4797977739
+          body: "Label: ACTION REQUIRED\nTask type: HEAVY_DOC_REPAIR\n..."
+          user:
+            login: ief-pm
+        repository:
+          full_name: everwork-ai/IEF-Adapters
+      captured_at: "2026-06-25T18:00:00Z"
+      source_system: github
+    normalized_output:
+      host_event_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+      source:
+        system: github
+        adapter: github-adapter
+        raw_payload_hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        raw_event_ref: "staging/github/issue_comment_4797977739.json"
+      ingested_at: "2026-06-25T18:00:01Z"
+      event_type: issue_comment
+      entity:
+        repo: everwork-ai/IEF-Adapters
+        issue_number: 2
+        pr_number: null
+        comment_id: "4797977739"
+        branch: null
+        commit_sha: null
+      actor: ief-pm
+      directive_text: "Label: ACTION REQUIRED — Adapter Contract v0"
+      labels:
+        - ACTION REQUIRED
+      classification_hint: HEAVY_DOC_REPAIR
+    task_envelope:
+      schema_version: v1
+      envelope_id: "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+      host_event:
+        $ref: "#/x-ief-examples/github_comment_mapping/normalized_output"
+      control_plane_action: dispatch
+      priority: urgent
+      routing_hint:
+        target_repo: everwork-ai/IEF-Adapters
+        target_issue_or_pr: 2
+        task_type: HEAVY_DOC_REPAIR
+      created_at: "2026-06-25T18:00:02Z"
+
+  # Example 2: CLI result input mapping
+  cli_result_mapping:
+    description: "Mapping a CLI tool execution result to a HostEvent"
+    raw_input:
+      raw_payload:
+        command: "pytest tests/ -v"
+        exit_code: 0
+        stdout: "5 passed, 0 failed"
+        stderr: ""
+        working_directory: "/repo"
+        executed_at: "2026-06-25T18:10:00Z"
+      captured_at: "2026-06-25T18:10:01Z"
+      source_system: cli
+    normalized_output:
+      host_event_id: "c3d4e5f6-a7b8-9012-cdef-123456789012"
+      source:
+        system: cli
+        adapter: cli-adapter
+        raw_payload_hash: "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+        raw_event_ref: "staging/cli/result_20260625_181000.json"
+      ingested_at: "2026-06-25T18:10:01Z"
+      event_type: cli_result
+      entity:
+        repo: everwork-ai/IEF-Runners
+        issue_number: null
+        pr_number: null
+        comment_id: null
+        branch: main
+        commit_sha: null
+      actor: claude-cli-worker
+      directive_text: "pytest tests/ -v → 5 passed, 0 failed"
+      labels: []
+      classification_hint: null
+    task_envelope:
+      schema_version: v1
+      envelope_id: "d4e5f6a7-b8c9-0123-defa-234567890123"
+      host_event:
+        $ref: "#/x-ief-examples/cli_result_mapping/normalized_output"
+      control_plane_action: dispatch
+      priority: normal
+      routing_hint:
+        target_repo: everwork-ai/IEF-Runners
+        target_issue_or_pr: null
+        task_type: null
+      created_at: "2026-06-25T18:10:02Z"
+
+  # Example 3: Ambiguous input rejection
+  ambiguous_input_rejection:
+    description: "Rejecting an ambiguous input that cannot be reliably normalized"
+    raw_input:
+      raw_payload:
+        message: "do something"
+        sender: "unknown-user"
+        channel: "chat"
+      captured_at: "2026-06-25T18:20:00Z"
+      source_system: chat_platform
+    rejection_response:
+      status: rejected
+      rejection_reason: malformed_payload
+      raw_payload_hash: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+      timestamp: "2026-06-25T18:20:01Z"
+      adapter_id: chat-adapter
+      error_detail: |
+        Input lacks required context: no repository identifier, no directive text,
+        no actionable instruction. Cannot normalize to HostEvent without fabricating
+        entity or directive fields. Rejecting per Section 8 (Unsupported Input Behavior)
+        and Section 9 (No-Fake-Completion Rules NFC-6).
+      logged: true
+      forwarded: false
+    normalization_failure_event:
+      host_event_id: "e5f6a7b8-c9d0-1234-efab-345678901234"
+      source:
+        system: chat_platform
+        adapter: chat-adapter
+        raw_payload_hash: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+      ingested_at: "2026-06-25T18:20:01Z"
+      event_type: normalization_failure
+      entity:
+        repo: null
+      actor: unknown-user
+      directive_text: "REJECTION: malformed_payload — input lacks required context for normalization"
+      labels: []
+      classification_hint: null
